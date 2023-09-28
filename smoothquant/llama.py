@@ -16,8 +16,7 @@ from transformers.models.llama.modeling_llama import (
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.activations import SiLUActivation
 from typing import Optional, Tuple, List
-# must use branch llama-dev in https://github.com/AniZpZ/torch-int
-from torch_int.nn.linear import W8A8BFP32OFP32LinearWithSFactor, W8A8BFP32OFP32Linear
+from torch_int.nn.linear import W8A8B8O8LinearWithSFactor, W8A8BFP32OFP32LinearWithSFactor
 from smoothquant.fake_quant import W8A8Linear
 from transformers.utils import logging
 logger = logging.get_logger(__name__)
@@ -43,16 +42,14 @@ class Int8LlamaAttention(nn.Module):
                 f" and `num_heads`: {self.num_heads})."
             )
 
-        self.k_proj = W8A8BFP32OFP32Linear(self.hidden_size, self.num_heads * self.head_dim)
-        self.v_proj = W8A8BFP32OFP32Linear(self.hidden_size, self.num_heads * self.head_dim)
-        self.q_proj = W8A8BFP32OFP32Linear(self.hidden_size, self.num_heads * self.head_dim)
-        # out is fp32
+        self.k_proj = W8A8BFP32OFP32LinearWithSFactor(self.hidden_size, self.num_heads * self.head_dim)
+        self.v_proj = W8A8BFP32OFP32LinearWithSFactor(self.hidden_size, self.num_heads * self.head_dim)
+        self.q_proj = W8A8BFP32OFP32LinearWithSFactor(self.hidden_size, self.num_heads * self.head_dim)
         self.o_proj = W8A8BFP32OFP32LinearWithSFactor(self.num_heads * self.head_dim, self.hidden_size)
 
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
     
     _shape = LlamaAttention._shape
-    
     @staticmethod
     @torch.no_grad()
     def from_float(module: LlamaAttention,
@@ -64,26 +61,16 @@ class Int8LlamaAttention(nn.Module):
                    out_input_scale: float):
         int8_module = Int8LlamaAttention(config)
         
-        # we do not impelement attn for now bacuase we want use paged attention
-        
-        # FIXME: Fuse the scaling into the q_proj output scale
-        linearList = [module.q_proj, module.k_proj, module.v_proj]
- 
-        qkv_list = W8A8BFP32OFP32Linear.from_float_fuse(
-            linearList,
-            attn_input_scale)
-        if len(qkv_list) != 3:
-            raise ValueError(
-                f"invalid qkv list len, must return 3 linears but get {len(qkv_list)}")
-
-        int8_module.q_proj = qkv_list[0]
-        int8_module.k_proj = qkv_list[1]
-        int8_module.v_proj = qkv_list[2]
-
+        int8_module.q_proj = W8A8BFP32OFP32LinearWithSFactor.from_float(
+            module.q_proj, attn_input_scale)
+        int8_module.k_proj = W8A8BFP32OFP32LinearWithSFactor.from_float(
+            module.k_proj, attn_input_scale)
+        int8_module.v_proj = W8A8BFP32OFP32LinearWithSFactor.from_float(
+            module.v_proj, attn_input_scale)
         int8_module.o_proj = W8A8BFP32OFP32LinearWithSFactor.from_float(
             module.o_proj, out_input_scale)
+
         return int8_module
-    
     @torch.no_grad()
     def forward(
         self,
@@ -141,7 +128,6 @@ class Int8LlamaAttention(nn.Module):
             attn_weights = None
         return attn_output, attn_weights, past_key_value
 
-# we keep scale in LlamaRMSNorm layer for kernel fusion
 class Int8LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
         """
@@ -150,7 +136,6 @@ class Int8LlamaRMSNorm(nn.Module):
         super().__init__()
         self.register_buffer('weight', torch.ones(hidden_size, dtype=torch.float32, requires_grad=False))
         self.variance_epsilon = eps
-    
     def forward(self, hidden_states):
         variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
@@ -158,8 +143,7 @@ class Int8LlamaRMSNorm(nn.Module):
         if self.weight.dtype in [torch.float16, torch.bfloat16]:
             hidden_states = hidden_states.to(self.weight.dtype)
         out = self.weight * hidden_states
-        int8_out = out.round().clamp(-128, 127).to(torch.int8)
-        return int8_out
+        return out
     
     @staticmethod
     def from_float(module: LlamaRMSNorm,
@@ -194,14 +178,11 @@ class Int8LlamaMLP(nn.Module):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.down_input_scale = 0.
-        # need fp32 out bcause silu
-        self.gate_proj = W8A8BFP32OFP32Linear(self.hidden_size, self.intermediate_size)
-
-        self.up_proj = W8A8BFP32OFP32Linear(self.hidden_size, self.intermediate_size)
+        self.gate_proj = W8A8BFP32OFP32LinearWithSFactor(self.hidden_size, self.intermediate_size)
+        self.up_proj = W8A8BFP32OFP32LinearWithSFactor(self.hidden_size, self.intermediate_size)
         self.down_proj = W8A8BFP32OFP32LinearWithSFactor(self.intermediate_size, self.hidden_size)
-        # silu_and_mul_kernel in vLLM can be a reference of SwiGLU
         self.act_fn = SiLUActivation()
-    
+
     @staticmethod
     @torch.no_grad()
     def from_float(module: LlamaMLP,
@@ -213,28 +194,13 @@ class Int8LlamaMLP(nn.Module):
                    down_input_scale: float,
                    down_output_scale: float):
         int8Mlp = Int8LlamaMLP(config)
-
-        # FIXME: Fuse the scaling into the q_proj output scale
-        print(f"gate in {gate_input_scale}, up in {up_input_scale}")
-        linearList = [module.gate_proj, module.up_proj]
-        gateup_list = W8A8BFP32OFP32Linear.from_float_fuse(
-            linearList, 
-            gate_input_scale)
-
-        if len(gateup_list) != 2:
-            raise ValueError(
-                f"invalid qkv gateup len, must return 2 linears but get {len(qkv_list)}")
-
-        int8Mlp.gate_proj = gateup_list[0]
-        int8Mlp.up_proj = gateup_list[1]
-        int8Mlp.down_proj = W8A8BFP32OFP32LinearWithSFactor.from_float(
-            module.down_proj, 
-            down_input_scale)
+        int8Mlp.gate_proj = W8A8BFP32OFP32LinearWithSFactor.from_float(module.gate_proj, gate_input_scale)
+        int8Mlp.up_proj = W8A8BFP32OFP32LinearWithSFactor.from_float(module.up_proj, up_input_scale)
+        int8Mlp.down_proj = W8A8BFP32OFP32LinearWithSFactor.from_float(module.down_proj, down_input_scale)
 
         return int8Mlp
         
     def forward(self, x):
-        # TODO: supprot self.config.pretraining_tp > 1 condition, adapt from transformer.modeling_llama
         hidden = self.act_fn(self.gate_proj(x).to(torch.float16))
         hidden = hidden * self.up_proj(x)
         return self.down_proj(hidden)
@@ -245,7 +211,6 @@ class Int8LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.self_attn = Int8LlamaAttention(config=config)
         self.mlp = Int8LlamaMLP(config)
-        #FIXME: use int8 rmsnorm
         self.input_layernorm = Int8LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Int8LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
     @staticmethod
@@ -266,7 +231,6 @@ class Int8LlamaDecoderLayer(nn.Module):
         int8_module = Int8LlamaDecoderLayer(
             config
         )
-
         int8_module.self_attn = Int8LlamaAttention.from_float(
             module.self_attn, 
             config,
@@ -296,7 +260,6 @@ class Int8LlamaDecoderLayer(nn.Module):
             gate_input_scale
         )
         return int8_module
-    
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -330,7 +293,6 @@ class Int8LlamaDecoderLayer(nn.Module):
         if use_cache:
             outputs += (present_key_value,)
         return outputs
-
 class Int8LlamaModel(LlamaPreTrainedModel):
     def __init__(self, config: LlamaConfig):
         super().__init__(config)
@@ -361,7 +323,6 @@ class Int8LlamaModel(LlamaPreTrainedModel):
             int8_module.layers[i] = Int8LlamaDecoderLayer.from_float(
                 layer, module.config, **decoder_layer_scales[i])
         return int8_module
-
 class Int8LlamaForCausalLM(LlamaPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
@@ -375,12 +336,10 @@ class Int8LlamaForCausalLM(LlamaPreTrainedModel):
     @staticmethod
     def from_float(module, decoder_layer_scales):
         int8_module = Int8LlamaForCausalLM(module.config)
-        print("start trans into int8, this might take a while")
         int8_module.model = Int8LlamaModel.from_float(
             module.model, decoder_layer_scales)
         int8_module.lm_head = module.lm_head
         return int8_module
-    
     get_input_embeddings = LlamaForCausalLM.get_input_embeddings
     set_input_embeddings = LlamaForCausalLM.set_input_embeddings
     get_output_embeddings = LlamaForCausalLM.get_output_embeddings
