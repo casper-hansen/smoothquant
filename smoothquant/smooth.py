@@ -42,12 +42,10 @@ def smooth_ln_fcs_llama(ln, fcs, act_scales, alpha=0.5):
     act_scales = act_scales.to(device=device, dtype=dtype)
     weight_scales = torch.cat([fc.weight.abs().max(
         dim=0, keepdim=True)[0] for fc in fcs], dim=0)
-    print(f"weight_scales shape: {weight_scales.shape}")
     weight_scales = weight_scales.max(dim=0)[0].clamp(min=1e-5)
     scales = (act_scales.pow(alpha) / weight_scales.pow(1-alpha)
               ).clamp(min=1e-5).to(device).to(dtype)
 
-    print(f'smoothed scales:{scales}')
     # do layer norm smooth
     ln.weight.div_(scales)
     for fc in fcs:
@@ -79,7 +77,6 @@ def smooth_lm(model, scales, alpha=0.5):
             fc1_input_scales = scales[name + '.mlp.dense_h_to_4h']
             smooth_ln_fcs(ffn_ln, fc1, fc1_input_scales, alpha)
         elif isinstance(module, LlamaDecoderLayer):
-            print(f"smooth llama decoder: {name}")
             attn_ln = module.input_layernorm #attention forward norm
             qkv = [module.self_attn.q_proj,
                    module.self_attn.k_proj, module.self_attn.v_proj]
