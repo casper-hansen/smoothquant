@@ -1,41 +1,28 @@
 import torch
 import argparse
-import os
-
 from pathlib import Path
-
-from transformers import AutoTokenizer
-
-from smoothquant.llama import Int8LlamaForCausalLM
 from smoothquant.smooth import smooth_lm
-
+from smoothquant.llama import Int8LlamaForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from smoothquant.calibration import get_static_llama_decoder_layer_scales
-from torch.nn.functional import pad
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-name", type=str, default='fp16_models/llama-13b')
+    parser.add_argument("--model-name", type=str, default='TheBloke/Llama-2-7b-chat-fp16')
     parser.add_argument("--num-samples", type=int, default=512)
     parser.add_argument("--seq-len", type=int, default=512)
     parser.add_argument("--act-scales", type=str,
-                        default='act_scales/llama-13b.pt')
+                        default='act_scales/llama-7b.pt')
     parser.add_argument("--output-path", type=str, default='int8_models')
-    parser.add_argument('--dataset-path', type=str, default='dataset/val.jsonl.zst',
+    parser.add_argument('--dataset-path', type=str, default='mit-han-lab/pile-val-backup',
                         help='location of the calibration dataset, we use the validation set of the Pile dataset')
     parser.add_argument('--export-FT', default=False, action="store_true")
     args = parser.parse_args()
-    model = OPTForCausalLM.from_pretrained(
-        args.model_name, device_map="auto", torch_dtype=torch.float16)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name, device_map="auto", torch_dtype=torch.float16, low_cpu_mem_usage=True)
     act_scales = torch.load(args.act_scales)
     smooth_lm(model, act_scales, 0.5)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-
-    if not os.path.exists(args.dataset_path):
-        print(f'Cannot find the dataset at {args.dataset_path}')
-        print('Please download the Pile dataset and put the validation set at the path')
-        print('You can download the validation dataset of the Pile at https://mystic.the-eye.eu/public/AI/pile/val.jsonl.zst')
-        raise FileNotFoundError
 
     decoder_layer_scales, raw_scales = get_static_llama_decoder_layer_scales(model,
                                                                             tokenizer,

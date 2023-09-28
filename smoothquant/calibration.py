@@ -37,7 +37,7 @@ def get_act_scales(model, tokenizer, dataset_path, num_samples=512, seq_len=512)
                     functools.partial(stat_input_hook, name=name))
             )
 
-    dataset = load_dataset("json", data_files=dataset_path, split="train")
+    dataset = load_dataset(dataset_path, split="validation")
     dataset = dataset.shuffle(seed=42)
 
     for i in tqdm(range(num_samples)):
@@ -156,7 +156,7 @@ def get_static_llama_decoder_layer_scales(model,
 
     print("Collecting activation scales...")
     pbar = tqdm(range(num_samples))
-    dataset = load_dataset('json', data_files=dataset_path, split="train")
+    dataset = load_dataset(dataset_path, split="validation")
     dataset = dataset.shuffle(seed=42)
     for i in pbar:
         input_ids = tokenizer(dataset[i]["text"], return_tensors="pt",
