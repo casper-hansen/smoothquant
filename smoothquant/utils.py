@@ -19,9 +19,9 @@ def quantize_llama_model(model, weight_quant='per_tensor', act_quant='per_tensor
         
         elif isinstance(m, LlamaMLP):
             m.gate_proj = W8A8Linear.from_float(
-                m.gate_proj, weight_quant=weight_quant, act_quant=act_quant, quantize_output=quantize_bmm_input)
+                m.gate_proj, weight_quant=weight_quant, act_quant=act_quant)
             m.up_proj = W8A8Linear.from_float(
-                m.up_proj, weight_quant=weight_quant, act_quant=act_quant, quantize_output=quantize_bmm_input)
+                m.up_proj, weight_quant=weight_quant, act_quant=act_quant)
             m.down_proj = W8A8Linear.from_float(
                 m.down_proj, weight_quant=weight_quant, act_quant=act_quant)
             

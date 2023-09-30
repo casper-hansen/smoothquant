@@ -5,6 +5,16 @@ from transformers.models.opt.modeling_opt import OPTDecoderLayer
 from transformers.models.bloom.modeling_bloom import BloomBlock
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaAttention, LlamaRMSNorm
 
+def extract_scales(fcs, act_scales, alpha, device, dtype):
+    act_scales = act_scales.to(device=device, dtype=dtype)
+    weight_scales = torch.cat([fc.weight.abs().max(
+        dim=0, keepdim=True)[0] for fc in fcs], dim=0)
+    weight_scales = weight_scales.max(dim=0)[0].clamp(min=1e-5)
+
+    scales = (act_scales.pow(alpha) / weight_scales.pow(1-alpha)
+              ).clamp(min=1e-5).to(device).to(dtype)
+
+    return scales
 
 @torch.no_grad()
 def smooth_ln_fcs(ln, fcs, act_scales, alpha=0.5):
@@ -16,13 +26,7 @@ def smooth_ln_fcs(ln, fcs, act_scales, alpha=0.5):
         assert ln.weight.numel() == fc.in_features == act_scales.numel()
 
     device, dtype = fcs[0].weight.device, fcs[0].weight.dtype
-    act_scales = act_scales.to(device=device, dtype=dtype)
-    weight_scales = torch.cat([fc.weight.abs().max(
-        dim=0, keepdim=True)[0] for fc in fcs], dim=0)
-    weight_scales = weight_scales.max(dim=0)[0].clamp(min=1e-5)
-
-    scales = (act_scales.pow(alpha) / weight_scales.pow(1-alpha)
-              ).clamp(min=1e-5).to(device).to(dtype)
+    scales = extract_scales(fcs, act_scales, alpha, device, dtype)
 
     ln.weight.div_(scales)
     ln.bias.div_(scales)
@@ -30,6 +34,17 @@ def smooth_ln_fcs(ln, fcs, act_scales, alpha=0.5):
     for fc in fcs:
         fc.weight.mul_(scales.view(1, -1))
 
+def smooth_fc_fcs_llama(prev_op, fcs, act_scales, alpha=0.5):
+    if not isinstance(fcs, list):
+        fcs = [fcs]
+    for fc in fcs:
+        assert isinstance(fc, nn.Linear)
+    device, dtype = fcs[0].weight.device, fcs[0].weight.dtype
+    scales = extract_scales(fcs, act_scales, alpha, device, dtype)
+
+    prev_op.weight[-scales.size(0):].div_(scales.view(-1, 1))
+    for fc in fcs:
+        fc.weight.mul_(scales.view(1, -1))
 
 def smooth_ln_fcs_llama(ln, fcs, act_scales, alpha=0.5):
     if not isinstance(fcs, list):
@@ -39,12 +54,7 @@ def smooth_ln_fcs_llama(ln, fcs, act_scales, alpha=0.5):
         assert isinstance(fc, nn.Linear)
         assert ln.weight.numel() == fc.in_features == act_scales.numel()
     device, dtype = fcs[0].weight.device, fcs[0].weight.dtype
-    act_scales = act_scales.to(device=device, dtype=dtype)
-    weight_scales = torch.cat([fc.weight.abs().max(
-        dim=0, keepdim=True)[0] for fc in fcs], dim=0)
-    weight_scales = weight_scales.max(dim=0)[0].clamp(min=1e-5)
-    scales = (act_scales.pow(alpha) / weight_scales.pow(1-alpha)
-              ).clamp(min=1e-5).to(device).to(dtype)
+    scales = extract_scales(fcs, act_scales, alpha, device, dtype)
 
     # do layer norm smooth
     ln.weight.div_(scales)
@@ -83,9 +93,23 @@ def smooth_lm(model, scales, alpha=0.5):
             qkv_input_scales = scales[name + '.self_attn.q_proj']
             smooth_ln_fcs_llama(attn_ln, qkv, qkv_input_scales, alpha)
 
+            if module.self_attn.v_proj.weight.shape == module.self_attn.o_proj.weight.shape:
+                smooth_fc_fcs_llama(
+                    module.self_attn.v_proj,
+                    module.self_attn.o_proj, 
+                    scales[name + '.self_attn.o_proj'], 
+                    alpha
+                )
+
             ffn_ln = module.post_attention_layernorm #feed forward norm
             fcs = [module.mlp.gate_proj, module.mlp.up_proj]
             fcs_input_scales = scales[name + '.mlp.gate_proj']
 
             smooth_ln_fcs_llama(ffn_ln, fcs, fcs_input_scales, alpha)
-        
+
+            smooth_fc_fcs_llama(
+                module.mlp.up_proj,
+                module.mlp.down_proj, 
+                scales[name + '.mlp.down_proj'], 
+                alpha
+            )
