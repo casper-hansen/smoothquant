@@ -44,9 +44,9 @@ for scale in scales:
         ppl = PerplexityV2(model_int8, tokenizer)
         out = ppl.calculate_perplexity(tokens=tokens)
 
-        regression = ((out[-1]/fp_16_ppl)-1)*100 
-        regression_str = 'higher' if regression >= 0 else 'lower'
-        result = f"INT8 Perplexity (Scale: {scale}): {out[-1]:.2f} ({regression:.2f}% {regression_str} than FP16)"
+        regression_pct = ((out[-1]-fp_16_ppl)/fp_16_ppl)*100
+        regression_str = 'higher' if regression_pct >= 0 else 'lower'
+        result = f"INT8 Perplexity (Scale: {scale}): {out[-1]:.2f} ({regression_pct:.2f}% {regression_str} than FP16)"
         results.append(result)
         print(result)
 
