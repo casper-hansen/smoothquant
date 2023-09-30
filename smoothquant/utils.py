@@ -137,7 +137,7 @@ class PerplexityV2:
         text_list = [' \n' if s == '' else s for s in data[self._text_column]]
         return ''.join(text_list)
 
-    def calculate_perplexity(self, stride=512, tokens=None):
+    def calculate_perplexity(self, stride=512, tokens=None, n_rounds=-1):
         if tokens is None:
             tokens = self._tokenizer(self._text, truncation=False, return_tensors="pt").input_ids.to(self._model.device)
         
@@ -145,7 +145,12 @@ class PerplexityV2:
         prev_end_loc = 0
         all_perplexity = []
 
-        with tqdm(range(0, seq_len, stride), desc="Perplexity: - ") as progress:
+        if n_rounds != -1:
+            full_range = [list(range(0, seq_len, stride))[:n_rounds]]
+        else:
+            full_range = range(0, seq_len, stride)
+
+        with tqdm(full_range, desc="Perplexity: - ") as progress:
             for begin_loc in progress:
                 nll = self._process_batch(tokens, begin_loc, prev_end_loc)
                 self._total_nll += nll.item()
