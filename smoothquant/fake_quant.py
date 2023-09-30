@@ -21,6 +21,13 @@ def quantize_weight_per_tensor_absmax(w, n_bits=8):
     w.div_(scales).round_().mul_(scales)
     return w
 
+@torch.no_grad()
+def quantize_activation_per_channel_absmax(w, n_bits=8):
+    scales = w.abs().max(dim=-1, keepdim=True)[0]
+    q_max = 2**(n_bits-1)-1
+    scales.clamp_(min=1e-5).div_(q_max)
+    w.div_(scales).round_().mul_(scales)
+    return w
 
 @torch.no_grad()
 def quantize_activation_per_token_absmax(t, n_bits=8):
@@ -66,6 +73,10 @@ class W8A8Linear(nn.Module):
             self.act_quant_name = 'per_tensor'
             self.act_quant = partial(
                 quantize_activation_per_tensor_absmax, n_bits=8)
+        elif act_quant == 'per_channel':
+            self.act_quant_name = 'per_channel'
+            self.act_quant = partial(
+                quantize_activation_per_channel_absmax, n_bits=8)
         else:
             raise ValueError(f'Invalid act_quant: {act_quant}')
 
