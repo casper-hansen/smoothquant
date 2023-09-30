@@ -87,7 +87,7 @@ def get_static_decoder_layer_scales(model,
 
     print("Collecting activation scales...")
     pbar = tqdm(range(num_samples))
-    dataset = load_dataset('json', data_files=dataset_path, split="train")
+    dataset = load_dataset(dataset_path, split="validation")
     dataset = dataset.shuffle(seed=42)
     for i in pbar:
         input_ids = tokenizer(dataset[i]["text"], return_tensors="pt",
